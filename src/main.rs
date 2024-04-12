@@ -1,45 +1,21 @@
 use rand::{thread_rng, Rng};
-use std::f64;
+use std::{f64, thread::JoinHandle};
 
 #[derive(Clone)]
 struct Neuron {
     delta: f64,
     weighted_input: f64,
     weights: Vec<f64>,
-    num_weights: i32,
     bias: f64,
     output: f64,
 }
 
-#[derive(Clone)]
-struct Layer {
-    size: i32,
-    neurons: Vec<Neuron>,
-}
-
-impl Layer {
-    fn compute(&mut self, previous_layer: &Layer, activation_function: fn(f64, bool) -> f64) {
-        for neuron in &mut self.neurons {
-            neuron.output = 0.0;
-            neuron.weighted_input = 0.0;
-            for i in 0..previous_layer.size {
-                neuron.weighted_input +=
-                    previous_layer.neurons[i as usize].output * neuron.weights[i as usize];
-            }
-            neuron.weighted_input += neuron.bias;
-            neuron.output = activation_function(neuron.weighted_input, false);
-        }
-    }
-}
-
 struct NeuralNetwork {
-    input_layer: Layer,
-    hidden_layers: Vec<Layer>,
-    output_layer: Layer,
-    num_hidden_layer: i32,
+    input_layer: Vec<Neuron>,
+    hidden_layers: Vec<Vec<Neuron>>,
+    output_layer: Vec<Neuron>,
     activation_function: fn(f64, bool) -> f64,
 }
-
 impl NeuralNetwork {
     fn new(
         hidden_layer_sizes: Vec<i32>,
@@ -47,13 +23,12 @@ impl NeuralNetwork {
         input_layer_size: i32,
         activation_function: fn(f64, bool) -> f64,
     ) -> Self {
-        let mut input_neurons = Vec::with_capacity(input_layer_size as usize);
+        let mut input_layer = Vec::with_capacity(input_layer_size as usize);
         for _ in 0..input_layer_size {
-            input_neurons.push(Neuron {
+            input_layer.push(Neuron {
                 delta: 0.0,
                 weighted_input: 0.0,
                 weights: Vec::new(),
-                num_weights: 0,
                 bias: 0.0,
                 output: 0.0,
             });
@@ -62,7 +37,7 @@ impl NeuralNetwork {
         let mut rng = thread_rng();
         let mut hidden_layers = Vec::with_capacity(hidden_layer_sizes.len());
         for &size in hidden_layer_sizes.iter() {
-            let mut hidden_layer_neurons = Vec::with_capacity(size as usize);
+            let mut hidden_layer = Vec::with_capacity(size as usize);
             let weights: Vec<f64>;
             if size == 0 {
                 weights = vec![rng.gen_range(-1.0..1.0); input_layer_size as usize];
@@ -71,22 +46,18 @@ impl NeuralNetwork {
                 weights = vec![rng.gen_range(-1.0..1.0); prev_layer_size];
             }
             for _ in 0..size {
-                hidden_layer_neurons.push(Neuron {
+                hidden_layer.push(Neuron {
                     delta: 0.0,
                     weighted_input: 0.0,
                     weights: weights.clone(),
-                    num_weights: weights.len() as i32,
                     bias: 0.0,
                     output: 0.0,
                 });
             }
-            hidden_layers.push(Layer {
-                size,
-                neurons: hidden_layer_neurons,
-            });
+            hidden_layers.push(hidden_layer);
         }
 
-        let mut output_neurons = Vec::with_capacity(output_layer_size as usize);
+        let mut output_layer = Vec::with_capacity(output_layer_size as usize);
         let weights: Vec<f64>;
         if hidden_layer_sizes.len() == 0 {
             weights = vec![rng.gen_range(-1.0..1.0); input_layer_size as usize];
@@ -97,57 +68,129 @@ impl NeuralNetwork {
             ];
         }
         for _ in 0..output_layer_size {
-            output_neurons.push(Neuron {
+            output_layer.push(Neuron {
                 delta: 0.0,
                 weighted_input: 0.0,
                 weights: weights.clone(),
-                num_weights: 0,
                 bias: 0.0,
                 output: 0.0,
             });
         }
 
         NeuralNetwork {
-            input_layer: Layer {
-                size: input_layer_size,
-                neurons: input_neurons,
-            },
+            input_layer,
             hidden_layers,
-            output_layer: Layer {
-                size: output_layer_size,
-                neurons: output_neurons,
-            },
-            num_hidden_layer: hidden_layer_sizes.len() as i32,
+            output_layer,
             activation_function,
         }
     }
 
-    fn compute(&mut self, inputs: Vec<f64>) {
-        for i in 0..self.input_layer.size {
-            self.input_layer.neurons[i as usize].output = inputs[i as usize];
+    fn softmax(&mut self) -> Vec<f64> {
+        let mut sum = 0.0;
+        for i in 0..self.output_layer.len() {
+            sum += f64::exp(self.output_layer[i].output);
+        }
+        let mut softmax_values = Vec::with_capacity(self.output_layer.len());
+        for i in 0..self.output_layer.len() {
+            let softmax_val = f64::exp(self.output_layer[i].output) / sum;
+            softmax_values.push(softmax_val);
         }
 
-        if self.num_hidden_layer == 0 {
-            self.output_layer
-                .compute(&self.input_layer, self.activation_function);
+        softmax_values
+    }
+
+    fn print_percentages(&mut self) {
+        let softmax_values = self.softmax();
+        for i in 0..softmax_values.len() {
+            print!("{} Percentage: {:.2}%. ", i, softmax_values[i] * 100.0);
+        }
+        println!();
+    }
+    fn compute(&mut self, inputs: Vec<f64>) {
+        // Add input
+        for i in 0..self.input_layer.len() {
+            self.input_layer[i].output = inputs[i];
+        }
+
+        // Feed foward
+        if self.hidden_layers.len() == 0 {
+            compute_layer(
+                &mut self.output_layer,
+                &self.input_layer,
+                self.activation_function,
+            );
         } else {
-            for i in 0..self.num_hidden_layer {
+            for i in 0..self.hidden_layers.len() {
                 if i == 0 {
-                    self.hidden_layers[i as usize]
-                        .compute(&self.input_layer, self.activation_function);
+                    compute_layer(
+                        &mut self.hidden_layers[i],
+                        &self.input_layer,
+                        self.activation_function,
+                    );
                 } else {
-                    let previous_layer = self.hidden_layers[i as usize - 1].clone();
-                    self.hidden_layers[i as usize]
-                        .compute(&previous_layer, self.activation_function);
+                    let previous_layer = self.hidden_layers[i - 1].clone();
+                    compute_layer(
+                        &mut self.hidden_layers[i],
+                        &previous_layer,
+                        self.activation_function,
+                    );
                 }
+            }
+        }
+    }
+    fn cost(&mut self, datas: &Vec<Data>) -> f64 {
+        let mut cost = 0.0;
+        for data in datas {
+            self.compute(data.inputs.clone());
+            for i in 0..self.output_layer.len() {
+                let neuron_output = self.output_layer[i].output;
+                cost += (neuron_output - output_expected(i as i32, data))
+                    * (neuron_output - output_expected(i as i32, data));
+            }
+        }
+        return cost / datas.len() as f64;
+    }
+
+    fn learn(&mut self, learn_rate: f64, training_data: &Vec<Data>) {
+        for data in training_data {
+            self.compute(data.inputs.clone());
+            for i in 0..self.output_layer.len() {
+                let neuron = &mut self.output_layer[i];
+                let expected = output_expected(i as i32, data);
+
+                neuron.delta = 2.0
+                    * (neuron.output - expected)
+                    * (self.activation_function)(neuron.weighted_input, true);
+
+                for j in 0..neuron.weights.len() {
+                    let input = self.hidden_layers[self.hidden_layers.len() - 1][j].output;
+                    neuron.weights[j] -= neuron.delta * input * learn_rate;
+                }
+
+                neuron.bias -= neuron.delta * learn_rate;
+            }
+
+            for i in self.hidden_layers.len() - 1..=0 {
+                let previous_layer;
+                let next_layer;
+                if i == 0 {
+                    previous_layer = &self.input_layer;
+                } else {
+                    previous_layer = &self.hidden_layers[i - 1];
+                }
+
+                if i == self.hidden_layers.len() - 1 {
+                    next_layer = &self.output_layer;
+                }
+
+                for j in 0..self.hidden_layers[i].len() {}
             }
         }
     }
 }
 
-const IMAGE_SIZE: usize = 28;
 struct Data {
-    inputs: [f64; IMAGE_SIZE * IMAGE_SIZE],
+    inputs: Vec<f64>,
     expected: f64,
 }
 
@@ -182,7 +225,21 @@ fn output_expected(neuron_index: i32, data: &Data) -> f64 {
     }
     return 0.0;
 }
-
+fn compute_layer(
+    layer: &mut Vec<Neuron>,
+    previous_layer: &Vec<Neuron>,
+    activation_function: fn(f64, bool) -> f64,
+) {
+    for neuron in layer {
+        neuron.output = 0.0;
+        neuron.weighted_input = 0.0;
+        for i in 0..previous_layer.len() {
+            neuron.weighted_input += previous_layer[i].output * neuron.weights[i];
+        }
+        neuron.weighted_input += neuron.bias;
+        neuron.output = activation_function(neuron.weighted_input, false);
+    }
+}
 fn main() {
     println!("Hello, world!");
 }
