@@ -37,27 +37,26 @@ impl NeuralNetwork {
         let mut hidden_layers = Vec::with_capacity(hidden_layer_sizes.len());
         for i in 0..hidden_layer_sizes.len() {
             let mut hidden_layer = Vec::with_capacity(hidden_layer_sizes[i] as usize);
-            let weights = if i == 0 {
-                let mut vec = Vec::with_capacity(input_layer_size as usize);
-                for _ in 0..input_layer_size {
-                    let mut rng = StdRng::from_entropy();
-                    vec.push(rng.gen_range(-1.0..1.0));
-                }
-                vec
-            } else {
-                let previous_layer_size = hidden_layer_sizes[i - 1] as usize;
-                let mut vec = Vec::with_capacity(previous_layer_size as usize);
-                for _ in 0..previous_layer_size {
-                    let mut rng = StdRng::from_entropy();
-                    vec.push(rng.gen_range(-1.0..1.0));
-                }
-                vec
-            };
             for _ in 0..hidden_layer_sizes[i] {
                 hidden_layer.push(Neuron {
                     delta: 0.0,
                     weighted_input: 0.0,
-                    weights: weights.clone(),
+                    weights: if i == 0 {
+                        let mut weights = Vec::with_capacity(input_layer_size as usize);
+                        for _ in 0..input_layer_size {
+                            let mut rng = StdRng::from_entropy();
+                            weights.push(rng.gen_range(-1.0..1.0));
+                        }
+                        weights
+                    } else {
+                        let previous_layer_size = hidden_layer_sizes[i - 1] as usize;
+                        let mut weights = Vec::with_capacity(previous_layer_size as usize);
+                        for _ in 0..previous_layer_size {
+                            let mut rng = StdRng::from_entropy();
+                            weights.push(rng.gen_range(-1.0..1.0));
+                        }
+                        weights
+                    },
                     bias: 0.0,
                     output: 0.0,
                 });
@@ -66,21 +65,20 @@ impl NeuralNetwork {
         }
 
         let mut output_layer = Vec::with_capacity(output_layer_size as usize);
-        let weights = {
-            let previous_layer_size =
-                hidden_layer_sizes[hidden_layer_sizes.len() as usize - 1] as usize;
-            let mut vec = Vec::with_capacity(previous_layer_size as usize);
-            for _ in 0..previous_layer_size {
-                let mut rng = StdRng::from_entropy();
-                vec.push(rng.gen_range(-1.0..1.0));
-            }
-            vec
-        };
         for _ in 0..output_layer_size {
             output_layer.push(Neuron {
                 delta: 0.0,
                 weighted_input: 0.0,
-                weights: weights.clone(),
+                weights: {
+                    let previous_layer_size =
+                        hidden_layer_sizes[hidden_layer_sizes.len() as usize - 1] as usize;
+                    let mut weights = Vec::with_capacity(previous_layer_size as usize);
+                    for _ in 0..previous_layer_size {
+                        let mut rng = StdRng::from_entropy();
+                        weights.push(rng.gen_range(-1.0..1.0));
+                    }
+                    weights
+                },
                 bias: 0.0,
                 output: 0.0,
             });
@@ -105,7 +103,7 @@ impl NeuralNetwork {
             softmax_values.push(softmax_val);
         }
 
-        softmax_values
+        return softmax_values;
     }
 
     fn print_percentages(&mut self) {
@@ -128,7 +126,7 @@ impl NeuralNetwork {
 
         println!()
     }
-    fn compute(&mut self, inputs: Vec<f64>) {
+    fn compute(&mut self, inputs: &Vec<f64>) {
         // Add input
         for i in 0..self.input_layer.len() {
             self.input_layer[i].output = inputs[i];
@@ -136,6 +134,7 @@ impl NeuralNetwork {
 
         for i in 0..self.hidden_layers.len() {
             // Feed foward
+            // Hidden layer
             if i == 0 {
                 compute_layer(
                     &mut self.hidden_layers[i],
@@ -143,14 +142,16 @@ impl NeuralNetwork {
                     self.activation_function,
                 );
             } else {
-                let previous_layer = self.hidden_layers[i - 1].clone();
+                let (previous_layers, current_and_future_layers) =
+                    self.hidden_layers.split_at_mut(i);
                 compute_layer(
-                    &mut self.hidden_layers[i],
-                    &previous_layer,
+                    &mut current_and_future_layers[0],
+                    &previous_layers[i - 1],
                     self.activation_function,
                 );
             }
         }
+        // Output layer
         compute_layer(
             &mut self.output_layer,
             &self.hidden_layers[self.hidden_layers.len() - 1],
@@ -160,7 +161,7 @@ impl NeuralNetwork {
     fn cost(&mut self, datas: &Vec<Data>) -> f64 {
         let mut cost = 0.0;
         for data in datas {
-            self.compute(data.inputs.clone());
+            self.compute(&data.inputs);
             for i in 0..self.output_layer.len() {
                 let neuron_output = self.output_layer[i].output;
                 cost += (neuron_output - output_expected(i as i32, data))
@@ -173,7 +174,7 @@ impl NeuralNetwork {
     fn learn(&mut self, learn_rate: f64, training_data: &Vec<Data>) {
         for data in training_data {
             // Output layer learn
-            self.compute(data.inputs.clone());
+            self.compute(&data.inputs);
             for i in 0..self.output_layer.len() {
                 let neuron = &mut self.output_layer[i];
                 let expected = output_expected(i as i32, data);
@@ -298,7 +299,7 @@ fn main() {
         expected: 1.0,
     };
     let mut datas = Vec::new();
-    datas.push(data1.clone());
+    datas.push(data1);
     datas.push(data2);
     datas.push(data3);
     datas.push(data4);
@@ -308,7 +309,7 @@ fn main() {
     }
 
     println!("Testing:... 0, 0");
-    nn.compute(data1.inputs);
+    nn.compute(&datas[0].inputs);
     nn.print_activation();
 
     // remove not used warning lol
