@@ -1,8 +1,9 @@
-use image::GenericImageView;
+extern crate rust_mnist;
+
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use rust_mnist::Mnist;
 use std::f64;
-use std::path::Path;
-use std::str;
+use std::time::Instant;
 
 #[derive(Clone)]
 struct Neuron {
@@ -130,7 +131,7 @@ impl NeuralNetwork {
             self.activation_function,
         );
     }
-    fn cost(&mut self, datas: &Vec<Data>) -> f64 {
+    fn cost(&mut self, datas: &[Data]) -> f64 {
         let mut cost = 0.0;
         for data in datas {
             self.compute(&data.inputs);
@@ -142,7 +143,7 @@ impl NeuralNetwork {
         return cost / datas.len() as f64;
     }
 
-    fn learn(&mut self, learn_rate: f64, training_data: &Vec<Data>) {
+    fn learn(&mut self, learn_rate: f64, training_data: &[Data]) {
         for data in training_data {
             // Output layer learn
             self.compute(&data.inputs);
@@ -209,6 +210,36 @@ impl NeuralNetwork {
             }
         }
     }
+
+    fn train(
+        &mut self,
+        learn_rate: f64,
+        learn_amount: i32,
+        epoch_per_learn: i32,
+        data_each_epoch: i32,
+    ) {
+        let training_data = Data::from_minst();
+        let mut start_time = Instant::now();
+        let mut rng = StdRng::from_entropy();
+        let mut rng_index = random_index(&training_data, &mut rng, epoch_per_learn);
+        let mut data_slice = &training_data[rng_index..rng_index + data_each_epoch as usize];
+
+        for i in 0..=learn_amount {
+            if i % epoch_per_learn == 0 && i != 0 {
+                let new_cost = self.cost(data_slice);
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let speed = data_each_epoch as f64 / elapsed * (epoch_per_learn as f64);
+                println!(
+                    "Epoch learned {}, cost: {}, elapsed time: {:.2}s, speed: {:.2} Data/s",
+                    i, new_cost, elapsed, speed
+                );
+                start_time = Instant::now();
+                rng_index = random_index(&training_data, &mut rng, epoch_per_learn);
+                data_slice = &training_data[rng_index..rng_index + data_each_epoch as usize];
+            }
+            self.learn(learn_rate, data_slice);
+        }
+    }
 }
 struct Data {
     inputs: Vec<f64>,
@@ -216,40 +247,21 @@ struct Data {
 }
 
 impl Data {
-    fn from_image(path: &str) -> Data {
-        const IMAGE_SIZE: usize = 28;
-
-        let mut data = Data {
-            inputs: vec![0.0; IMAGE_SIZE * IMAGE_SIZE],
-            expected: 0.0,
-        };
-
-        let img = match image::open(path) {
-            Ok(img) => img,
-            Err(_) => {
-                eprintln!("Failed to load image: {}", path);
-                return data;
-            }
-        };
-
-        let (width, height) = img.dimensions();
-        if width != IMAGE_SIZE as u32 || height != IMAGE_SIZE as u32 {
-            eprintln!("Invalid image dimensions: {}", path);
-            return data;
+    fn from_minst() -> Vec<Self> {
+        println!("Loading minst...");
+        let mut training_data = Vec::new();
+        let mnist = Mnist::new("mnist/");
+        for (i, mnist_data) in mnist.train_data.iter().enumerate() {
+            training_data.push(Data {
+                inputs: mnist_data
+                    .iter()
+                    .map(|&pixel| pixel as f64 / 255.0)
+                    .collect(),
+                expected: mnist.train_labels[i] as f64,
+            })
         }
-
-        let img = img.into_luma8();
-        for (i, pixel) in img.pixels().enumerate() {
-            data.inputs[i] = f64::from(pixel[0]) / 255.0;
-        }
-
-        let filename = Path::new(path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        data.expected = filename.parse().unwrap_or(0.0);
-
-        return data;
+        println!("Done!");
+        return training_data;
     }
 
     fn add_noise(&mut self, noise_level: f64, probability: f64) {
@@ -292,6 +304,13 @@ fn output_expected(neuron_index: i32, data: &Data) -> f64 {
         return 1.0;
     }
     return 0.0;
+}
+fn random_index(array: &Vec<Data>, rng: &mut StdRng, amount: i32) -> usize {
+    let mut rng_index = rng.gen_range(0..array.len());
+    while rng_index as i32 + amount >= array.len() as i32 {
+        rng_index = rng.gen_range(0..array.len());
+    }
+    return rng_index;
 }
 fn new_layer(size: usize, previous_size: usize) -> Vec<Neuron> {
     let mut layer = Vec::with_capacity(size);
@@ -336,23 +355,6 @@ fn main() {
         IMAGE_SIZE as i32 * IMAGE_SIZE as i32,
         sigmoid,
     );
-    let mut data1 = Data::from_image("data/train/0/1.png");
-    data1.add_noise(0.2, 0.2);
-    let mut datas = Vec::new();
-    datas.push(data1);
-    for i in 0..80 {
-        nn.learn(1.5, &datas);
-        println!("learned: {}, cost: {}", i, nn.cost(&datas));
-    }
 
-    println!("Testing:... data 1");
-    nn.compute(&datas[0].inputs);
-    nn.print_activation();
-
-    // remove not used warning lol
-    relu(0.0, true);
-    nn.softmax();
-    if nn.hidden_layers[0][0].output == 120.0 {
-        nn.print_percentages();
-    }
+    nn.train(0.03, 10000, 60, 10);
 }

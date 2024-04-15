@@ -455,6 +455,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "rand",
+ "rust-mnist",
 ]
 
 [[package]]
@@ -727,6 +728,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05aaa8004b64fd573fc9d002f4e632d51ad4f026c2b5ba95fcb6c2f32c2c47d8"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "rust-mnist"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f701613ce754c4614b557827f506381b486a29c98b55046765800e79208d3912"
+dependencies = [
+ "log",
 ]
 
 [[package]]
