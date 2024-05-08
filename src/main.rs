@@ -6,9 +6,9 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use rust_mnist::Mnist;
 use rustacuda::prelude::*;
 use std::error::Error;
-use std::f64;
 use std::ffi::CString;
 use std::time::Instant;
+use std::{f64, vec};
 
 struct NeuralNetwork {
     delta: Vec<Vec<f64>>,
@@ -181,14 +181,13 @@ impl NeuralNetwork {
                 d_bias,
                 d_weights,
             )?;
-            self.compute(&data.inputs);
 
             // Output layer learn
             unsafe {
                 let start_index = sum_vec(&self.sizes[0..self.sizes.len() - 1]);
                 let weights_start = sum_weights(&self.sizes[0..self.sizes.len() - 1]);
                 let grid_size = (*self.sizes.last().unwrap() as u32 + block_size - 1) / block_size;
-                launch!(module.compute_layer<<<grid_size, block_size, 0, stream>>>(
+                launch!(module.learn_output<<<grid_size, block_size, 0, stream>>>(
                     d_output.as_device_ptr(),
                     d_delta.as_device_ptr(),
                     d_weighted_input.as_device_ptr(),
@@ -203,79 +202,28 @@ impl NeuralNetwork {
                 ))?;
                 stream.synchronize()?;
             }
-            for output_neuron_index in 0..self.output.last().unwrap().len() {
-                let expected = output_expected(output_neuron_index as i32, data);
-
-                self.delta.last_mut().unwrap()[output_neuron_index] = 2.0
-                    * (self.output.last().unwrap()[output_neuron_index] - expected)
-                    * activation(
-                        self.weighted_input.last().unwrap()[output_neuron_index],
-                        true,
-                    );
-
-                // Allocate memory on the device and copy data to device
-                let mut d_inputs = DeviceBuffer::from_slice(&self.output[self.output.len() - 2])?;
-                let mut d_weights = DeviceBuffer::from_slice(
-                    &self.weights.last_mut().unwrap()[output_neuron_index],
-                )?;
-
-                let grid_size: u32 =
-                    (self.weights.last().unwrap().len() as u32 + block_size - 1) / block_size;
-                // Call the CUDA function
-                unsafe {
-                    launch!(module.update_weights<<<grid_size, block_size, 0, stream>>>(
-                        d_weights.as_device_ptr(),
-                        self.delta.last().unwrap()[output_neuron_index],
-                        d_inputs.as_device_ptr(),
-                        learn_rate,
-                        self.weights.last().unwrap()[output_neuron_index].len()
-                    ))?;
-
-                    stream.synchronize()?;
-                }
-
-                // Copy the updated weights back to the host
-                d_weights.copy_to(&mut self.weights.last_mut().unwrap()[output_neuron_index])?;
-
-                self.bias.last_mut().unwrap()[output_neuron_index] -=
-                    self.delta.last().unwrap()[output_neuron_index] * learn_rate;
-            }
 
             // Hidden layer learn
             for layer_index in (1..self.output.len() - 1).rev() {
-                for i in 0..self.output[layer_index].len() {
-                    self.delta[layer_index][i] = 0.0;
-
-                    for next_neuron_index in 0..self.output[layer_index + 1].len() {
-                        self.delta[layer_index][i] += self.weights[layer_index + 1]
-                            [next_neuron_index][i]
-                            * self.delta[layer_index + 1][next_neuron_index]
-                            * activation(self.weighted_input[layer_index][i], true);
-                    }
-
-                    // Allocate memory on the device and copy data to device
-                    let mut d_inputs = DeviceBuffer::from_slice(&self.output[layer_index - 1])?;
-                    let mut d_weights = DeviceBuffer::from_slice(&self.weights[layer_index][i])?;
-
-                    let grid_size: u32 =
-                        (self.weights[layer_index][i].len() as u32 + block_size - 1) / block_size;
-                    // Call the CUDA function
-                    unsafe {
-                        launch!(module.update_weights<<<grid_size, block_size, 0, stream>>>(
-                            d_weights.as_device_ptr(),
-                            self.delta[layer_index][i],
-                            d_inputs.as_device_ptr(),
-                            learn_rate,
-                            self.weights[layer_index][i].len()
-                        ))?;
-
-                        stream.synchronize()?;
-                    }
-
-                    // Copy the updated weights back to the host
-                    d_weights.copy_to(&mut self.weights[layer_index][i])?;
-
-                    self.bias[layer_index][i] -= self.delta[layer_index][i] * learn_rate;
+                unsafe {
+                    let start_index = sum_vec(&self.sizes[0..layer_index]);
+                    let weights_start = sum_weights(&self.sizes[0..layer_index]);
+                    let grid_size =
+                        (*self.sizes.last().unwrap() as u32 + block_size - 1) / block_size;
+                    launch!(module.learn_intermediate<<<grid_size, block_size, 0, stream>>>(
+                        d_output.as_device_ptr(),
+                        d_delta.as_device_ptr(),
+                        d_weighted_input.as_device_ptr(),
+                        d_bias.as_device_ptr(),
+                        d_weights.as_device_ptr(),
+                        start_index,
+                        weights_start,
+                        self.sizes[layer_index],
+                        self.sizes[layer_index - 1],
+                        self.sizes[layer_index + 1],
+                        learn_rate
+                    ))?;
+                    stream.synchronize()?;
                 }
             }
         }
@@ -364,7 +312,6 @@ impl NeuralNetwork {
                 start = end;
             }
         }
-
         Ok(())
     }
 
@@ -384,7 +331,7 @@ impl NeuralNetwork {
 
 struct Data {
     inputs: Vec<f64>,
-    expected: f64,
+    expected: i32,
 }
 
 impl Data {
@@ -398,7 +345,7 @@ impl Data {
                     .iter()
                     .map(|&pixel| pixel as f64 / 255.0)
                     .collect(),
-                expected: mnist.train_labels[i] as f64,
+                expected: mnist.train_labels[i] as i32,
             })
         }
         println!("Done!");
@@ -467,7 +414,7 @@ fn activation(val: f64, is_derivative: bool) -> f64 {
 }
 
 fn output_expected(neuron_index: i32, data: &Data) -> f64 {
-    if data.expected == neuron_index as f64 {
+    if data.expected == neuron_index {
         return 1.0;
     }
     return 0.0;
@@ -503,14 +450,14 @@ fn init_cuda() -> Result<(Module, Stream, Context), Box<dyn Error>> {
 fn main() -> Result<(), Box<dyn Error>> {
     const IMAGE_SIZE: usize = 28;
     let mut nn = NeuralNetwork::new(vec![IMAGE_SIZE as i32 * IMAGE_SIZE as i32, 100, 16, 10]);
-    nn.train(0.03, 1000, 10, 10)?;
+    nn.train(0.03, 10000, 64, 64)?;
 
     // remove warning
     nn.print_activation();
     nn.print_percentages();
     let mut data = Data {
         inputs: vec![0.1, 0.2],
-        expected: 1.0,
+        expected: 1,
     };
     data.add_noise(0.1, 0.1);
     Ok(())
