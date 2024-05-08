@@ -1,3 +1,4 @@
+#include <math.h>
 extern "C" __global__ void update_weights(double *weights, double delta, double *input, double learn_rate, int len)
 {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
@@ -6,20 +7,71 @@ extern "C" __global__ void update_weights(double *weights, double delta, double 
         weights[i] -= delta * input[i] * learn_rate;
     }
 }
+extern "C" __global__ void add_input(double *output, double *input, int len)
+{
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < len)
+    {
+        output[i] = input[i];
+    }
+}
+extern "C" __global__ void compute_layer(double *output, double *delta, double *weighted_input, double *bias, double *weights, double start_index, int weights_start, int len, int previous_len)
+{
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int previous_start = start_index - previous_len;
+    if (i < len)
+    {
+        int index = i + start_index;
+        output[index] = 0.0;
+        weighted_input[index] = 0.0;
+        for (int j = 0; j < previous_len; j++)
+        {
+            weighted_input[index] += output[previous_start + j] * weights[weights_start + i * previous_len + j];
+        }
+        weighted_input[index] += bias[index];
+        // sigmoid
+        output[index] = 1.0 / (1.0 + exp(weighted_input[index]));
+    }
+}
 
-extern "C" __global__ void learn_output(double **weights, double *delta, double **inputs, double *weighted_input, double *output, double *bias, double learn_rate, int previous_size, int current_size, int data_expected)
+extern "C" __global__ void learn_output(double *output, double *delta, double *weighted_input, double *bias, double *weights, double start_index, int weights_start, int len, int previous_len, int expected_index, double learn_rate)
 {
     // not finished
     int i = threadIdx.x + blockIdx.x * blockDim.x;
-    if (i < current_size)
+    int previous_start = start_index - previous_len;
+    if (i < len)
     {
-        double expected = data_expected == i ? 1.0 : 0.0;
-        double activation_derivative = (1 - weighted_input[i]) * weighted_input[i]; // Assuming sigmoid activation function
-        delta[i] = 2.0 * (output[i] - expected) * activation_derivative;
-        for (int j = 0; j < previous_size; j++)
+        int index = i + start_index;
+        double expected = expected_index == i ? 1.0 : 0.0;
+
+        // Sigmoid activation function derivative
+        double activation_derivative = (1 - weighted_input[index]) * weighted_input[index];
+        delta[index] = 2.0 * (output[index] - expected) * activation_derivative;
+        for (int j = 0; j < previous_len; j++)
         {
-            weights[i][j] -= delta[i] * inputs[i][j] * learn_rate;
+            weights[weights_start + i * previous_len + j] -= delta[index] * output[previous_start + j] * learn_rate;
         }
-        bias[i] -= delta[i] * learn_rate;
+        bias[index] -= delta[index] * learn_rate;
+    }
+}
+
+extern "C" __global__ void learn_intermediate(double *output, double *delta, double *weighted_input, double *bias, double *weights, double start_index, int weights_start, int len, int previous_len, int expected_index, double learn_rate)
+{
+    // not finished
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int previous_start = start_index - previous_len;
+    if (i < len)
+    {
+        int index = i + start_index;
+        double expected = expected_index == i ? 1.0 : 0.0;
+
+        // Sigmoid activation function derivative
+        double activation_derivative = (1 - weighted_input[index]) * weighted_input[index];
+        delta[index] = 2.0 * (output[index] - expected) * activation_derivative;
+        for (int j = 0; j < previous_len; j++)
+        {
+            weights[weights_start + i * previous_len + j] -= delta[index] * output[previous_start + j] * learn_rate;
+        }
+        bias[index] -= delta[index] * learn_rate;
     }
 }

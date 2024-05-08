@@ -1,4 +1,5 @@
 extern crate rust_mnist;
+
 #[macro_use]
 extern crate rustacuda;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -15,10 +16,10 @@ struct NeuralNetwork {
     bias: Vec<Vec<f64>>,
     output: Vec<Vec<f64>>,
     weights: Vec<Vec<Vec<f64>>>,
-    activation_function: fn(f64, bool) -> f64,
+    sizes: Vec<i32>,
 }
 impl NeuralNetwork {
-    fn new(layer_sizes: Vec<i32>, activation_function: fn(f64, bool) -> f64) -> Self {
+    fn new(layer_sizes: Vec<i32>) -> Self {
         let mut delta = Vec::new();
         let mut weighted_input = Vec::new();
         let mut bias = Vec::new();
@@ -49,7 +50,7 @@ impl NeuralNetwork {
             bias,
             output,
             weights,
-            activation_function,
+            sizes: layer_sizes,
         }
     }
 
@@ -109,25 +110,105 @@ impl NeuralNetwork {
         return cost / datas.len() as f64;
     }
 
+    fn compute_gpu(
+        &mut self,
+        inputs: &Vec<f64>,
+        cuda: &(Module, Stream, Context),
+        d_output: &mut DeviceBuffer<f64>,
+        d_delta: &mut DeviceBuffer<f64>,
+        d_weighted_input: &mut DeviceBuffer<f64>,
+        d_bias: &mut DeviceBuffer<f64>,
+        d_weights: &mut DeviceBuffer<f64>,
+    ) -> Result<(), Box<dyn Error>> {
+        let module = &cuda.0;
+        let stream = &cuda.1;
+        let block_size: u32 = 256;
+        let mut d_input = DeviceBuffer::from_slice(inputs)?;
+        // add input
+        let mut grid_size: u32 = (self.sizes[0] as u32 + block_size - 1) / block_size;
+        unsafe {
+            launch!(module.add_input<<<grid_size, block_size, 0, stream>>>(
+                d_output.as_device_ptr(),
+                d_input.as_device_ptr(),
+                self.sizes[0]
+            ))?;
+            stream.synchronize()?;
+            // compute layer
+            let mut start_index = self.sizes[0];
+            let mut weights_start = 0;
+            for i in 1..self.sizes.len() {
+                grid_size = (self.sizes[i] as u32 + block_size - 1) / block_size;
+                launch!(module.compute_layer<<<grid_size, block_size, 0, stream>>>(
+                    d_output.as_device_ptr(),
+                    d_delta.as_device_ptr(),
+                    d_weighted_input.as_device_ptr(),
+                    d_bias.as_device_ptr(),
+                    d_weights.as_device_ptr(),
+                    start_index,
+                    weights_start,
+                    self.sizes[i],
+                    self.sizes[i - 1]
+                ))?;
+                start_index += self.sizes[i];
+                weights_start += self.sizes[i] * self.sizes[i - 1];
+                stream.synchronize()?;
+            }
+        }
+
+        Ok(())
+    }
     fn learn(
         &mut self,
         learn_rate: f64,
         training_data: &[Data],
         cuda: &(Module, Stream, Context),
+        d_output: &mut DeviceBuffer<f64>,
+        d_delta: &mut DeviceBuffer<f64>,
+        d_weighted_input: &mut DeviceBuffer<f64>,
+        d_bias: &mut DeviceBuffer<f64>,
+        d_weights: &mut DeviceBuffer<f64>,
     ) -> Result<(), Box<dyn Error>> {
         let module = &cuda.0;
         let stream = &cuda.1;
         let block_size: u32 = 256;
         for data in training_data {
-            // Output layer learn
+            self.compute_gpu(
+                &data.inputs,
+                cuda,
+                d_output,
+                d_delta,
+                d_weighted_input,
+                d_bias,
+                d_weights,
+            )?;
             self.compute(&data.inputs);
 
+            // Output layer learn
+            unsafe {
+                let start_index = sum_vec(&self.sizes[0..self.sizes.len() - 1]);
+                let weights_start = sum_weights(&self.sizes[0..self.sizes.len() - 1]);
+                let grid_size = (*self.sizes.last().unwrap() as u32 + block_size - 1) / block_size;
+                launch!(module.compute_layer<<<grid_size, block_size, 0, stream>>>(
+                    d_output.as_device_ptr(),
+                    d_delta.as_device_ptr(),
+                    d_weighted_input.as_device_ptr(),
+                    d_bias.as_device_ptr(),
+                    d_weights.as_device_ptr(),
+                    start_index,
+                    weights_start,
+                    *self.sizes.last().unwrap(),
+                    self.sizes[self.sizes.len() - 2],
+                    data.expected,
+                    learn_rate
+                ))?;
+                stream.synchronize()?;
+            }
             for output_neuron_index in 0..self.output.last().unwrap().len() {
                 let expected = output_expected(output_neuron_index as i32, data);
 
                 self.delta.last_mut().unwrap()[output_neuron_index] = 2.0
                     * (self.output.last().unwrap()[output_neuron_index] - expected)
-                    * (self.activation_function)(
+                    * activation(
                         self.weighted_input.last().unwrap()[output_neuron_index],
                         true,
                     );
@@ -169,7 +250,7 @@ impl NeuralNetwork {
                         self.delta[layer_index][i] += self.weights[layer_index + 1]
                             [next_neuron_index][i]
                             * self.delta[layer_index + 1][next_neuron_index]
-                            * (self.activation_function)(self.weighted_input[layer_index][i], true);
+                            * activation(self.weighted_input[layer_index][i], true);
                     }
 
                     // Allocate memory on the device and copy data to device
@@ -209,6 +290,13 @@ impl NeuralNetwork {
         data_each_epoch: i32,
     ) -> Result<(), Box<dyn Error>> {
         let cuda = init_cuda()?;
+        let flattened_weights = flatten_weights(&self.weights);
+        let flattened_bias = flatten_vec(&self.bias);
+        let mut d_bias = DeviceBuffer::from_slice(&flatten_vec(&self.bias))?;
+        let mut d_output = DeviceBuffer::from_slice(&flatten_vec(&self.output))?;
+        let mut d_weighted_input = DeviceBuffer::from_slice(&flatten_vec(&self.weighted_input))?;
+        let mut d_delta = DeviceBuffer::from_slice(&flatten_vec(&self.delta))?;
+        let mut d_weights = DeviceBuffer::from_slice(&flatten_weights(&self.weights))?;
         let training_data = Data::from_minst();
         let mut start_time = Instant::now();
         let mut rng = StdRng::from_entropy();
@@ -228,8 +316,55 @@ impl NeuralNetwork {
                 rng_index = random_index(&training_data, &mut rng, epoch_per_learn);
                 data_slice = &training_data[rng_index..rng_index + data_each_epoch as usize];
             }
-            self.learn(learn_rate, data_slice, &cuda)?;
+            self.learn(
+                learn_rate,
+                data_slice,
+                &cuda,
+                &mut d_output,
+                &mut d_delta,
+                &mut d_weighted_input,
+                &mut d_bias,
+                &mut d_weights,
+            )?;
+            self.copy_bias_from_device(&d_bias, flattened_bias.len())?;
+            self.copy_weights_from_device(&d_weights, flattened_weights.len())?;
         }
+        Ok(())
+    }
+
+    fn copy_bias_from_device(
+        &mut self,
+        d_bias: &DeviceBuffer<f64>,
+        size: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut bias_data = vec![0.0; size];
+        d_bias.copy_to(&mut bias_data)?;
+        let mut start = 0;
+        for i in 0..self.bias.len() {
+            let end = start + self.bias[i].len();
+            self.bias[i] = bias_data[start..end].to_vec();
+            start = end;
+        }
+        Ok(())
+    }
+
+    fn copy_weights_from_device(
+        &mut self,
+        d_weights: &DeviceBuffer<f64>,
+        size: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut weights_data = vec![0.0; size];
+        d_weights.copy_to(&mut weights_data)?;
+
+        let mut start = 0;
+        for i in 0..self.weights.len() {
+            for j in 0..self.weights[i].len() {
+                let end = start + self.weights[i][j].len();
+                self.weights[i][j] = weights_data[start..end].to_vec();
+                start = end;
+            }
+        }
+
         Ok(())
     }
 
@@ -242,8 +377,7 @@ impl NeuralNetwork {
                     self.output[layer_index - 1][j] * self.weights[layer_index][i][j];
             }
             self.weighted_input[layer_index][i] += self.bias[layer_index][i];
-            self.output[layer_index][i] =
-                (self.activation_function)(self.weighted_input[layer_index][i], false);
+            self.output[layer_index][i] = activation(self.weighted_input[layer_index][i], false);
         }
     }
 }
@@ -281,6 +415,41 @@ impl Data {
     }
 }
 
+fn sum_vec(vec: &[i32]) -> i32 {
+    let mut sum = 0;
+    for value in vec {
+        sum += value;
+    }
+    return sum;
+}
+
+fn sum_weights(vec: &[i32]) -> i32 {
+    let mut sum = 0;
+    for i in 0..vec.len() {
+        if i == 0 {
+            continue;
+        }
+        sum += vec[i] * vec[i - 1];
+    }
+    return sum;
+}
+fn flatten_vec(vec: &[Vec<f64>]) -> Vec<f64> {
+    let mut flattened: Vec<f64> = Vec::new();
+    for row in vec {
+        flattened.extend_from_slice(&row);
+    }
+    flattened
+}
+fn flatten_weights(weights: &[Vec<Vec<f64>>]) -> Vec<f64> {
+    let mut flattened: Vec<f64> = Vec::new();
+    for layer in weights {
+        for row in layer {
+            flattened.extend_from_slice(&row);
+        }
+    }
+    flattened
+}
+
 fn max(a: f64, b: f64) -> f64 {
     if a > b {
         return a;
@@ -288,22 +457,13 @@ fn max(a: f64, b: f64) -> f64 {
     return b;
 }
 
-fn sigmoid(val: f64, is_derivative: bool) -> f64 {
+fn activation(val: f64, is_derivative: bool) -> f64 {
+    // sigmoid
     let result = 1.0 / (1.0 + f64::exp(-val));
     if is_derivative {
         return result * (1.0 - result);
     }
     return result;
-}
-
-fn relu(val: f64, is_derivative: bool) -> f64 {
-    if is_derivative {
-        if val > 0.0 {
-            return 1.0;
-        }
-        return 0.0;
-    }
-    return max(0.0, val);
 }
 
 fn output_expected(neuron_index: i32, data: &Data) -> f64 {
@@ -342,10 +502,16 @@ fn init_cuda() -> Result<(Module, Stream, Context), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     const IMAGE_SIZE: usize = 28;
-    let mut nn = NeuralNetwork::new(
-        vec![IMAGE_SIZE as i32 * IMAGE_SIZE as i32, 100, 16, 10],
-        sigmoid,
-    );
+    let mut nn = NeuralNetwork::new(vec![IMAGE_SIZE as i32 * IMAGE_SIZE as i32, 100, 16, 10]);
     nn.train(0.03, 1000, 10, 10)?;
+
+    // remove warning
+    nn.print_activation();
+    nn.print_percentages();
+    let mut data = Data {
+        inputs: vec![0.1, 0.2],
+        expected: 1.0,
+    };
+    data.add_noise(0.1, 0.1);
     Ok(())
 }
