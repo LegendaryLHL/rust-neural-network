@@ -36,7 +36,7 @@ impl NeuralNetwork {
                 for _ in 0..*layer_size {
                     let mut new_weights = Vec::new();
                     for _ in 0..layer_sizes[i - 1] {
-                        new_weights.push(rng.gen_range(0.0..1.0));
+                        new_weights.push(rng.gen_range(-1.0..1.0));
                     }
                     neuron_weights.push(new_weights);
                 }
@@ -77,6 +77,7 @@ impl NeuralNetwork {
         }
         println!();
     }
+
     fn print_activation(&mut self) {
         for (i, output) in self.output.last().unwrap().iter().enumerate() {
             print!("{} -> Activation: {:.2}", i, *output);
@@ -253,6 +254,8 @@ impl NeuralNetwork {
 
         for i in 0..=learn_amount {
             if i % epoch_per_learn == 0 && i != 0 {
+                self.copy_bias_from_device(&d_bias, flattened_bias.len())?;
+                self.copy_weights_from_device(&d_weights, flattened_weights.len())?;
                 let new_cost = self.cost(data_slice);
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let speed = data_each_epoch as f64 / elapsed * (epoch_per_learn as f64);
@@ -274,8 +277,6 @@ impl NeuralNetwork {
                 &mut d_bias,
                 &mut d_weights,
             )?;
-            self.copy_bias_from_device(&d_bias, flattened_bias.len())?;
-            self.copy_weights_from_device(&d_weights, flattened_weights.len())?;
         }
         Ok(())
     }
@@ -327,6 +328,19 @@ impl NeuralNetwork {
             self.output[layer_index][i] = activation(self.weighted_input[layer_index][i], false);
         }
     }
+
+    fn test_nn(&mut self) -> f64 {
+        println!("testing...");
+        let test_data = Data::from_minst_test();
+        let mut correct_count = 0;
+        for data in &test_data {
+            self.compute(&data.inputs);
+            if self.softmax()[data.expected as usize] * 100.0 > 15.0 {
+                correct_count += 1;
+            }
+        }
+        return correct_count as f64 / test_data.len() as f64 * 100.0;
+    }
 }
 
 struct Data {
@@ -349,7 +363,24 @@ impl Data {
             })
         }
         println!("Done!");
+
         return training_data;
+    }
+
+    fn from_minst_test() -> Vec<Self> {
+        let mut testing_data = Vec::new();
+        let mnist = Mnist::new("mnist/");
+        for (i, mnist_data) in mnist.test_data.iter().enumerate() {
+            testing_data.push(Data {
+                inputs: mnist_data
+                    .iter()
+                    .map(|&pixel| pixel as f64 / 255.0)
+                    .collect(),
+                expected: mnist.test_labels[i] as i32,
+            })
+        }
+
+        return testing_data;
     }
 
     fn add_noise(&mut self, noise_level: f64, probability: f64) {
@@ -450,7 +481,9 @@ fn init_cuda() -> Result<(Module, Stream, Context), Box<dyn Error>> {
 fn main() -> Result<(), Box<dyn Error>> {
     const IMAGE_SIZE: usize = 28;
     let mut nn = NeuralNetwork::new(vec![IMAGE_SIZE as i32 * IMAGE_SIZE as i32, 100, 16, 10]);
-    nn.train(0.03, 10000, 64, 64)?;
+    nn.train(0.03, 5000, 64, 64)?;
+
+    println!("Correct percentage: {:.2}%", nn.test_nn());
 
     // remove warning
     nn.print_activation();

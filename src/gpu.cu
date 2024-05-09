@@ -47,7 +47,7 @@ extern "C" __global__ void learn_output(double *output, double *delta, double *w
 
         // Sigmoid activation function derivative
         double weighted_input_derivative = 1.0 / (1.0 + exp(-weighted_input[index]));
-        double activation_derivative = (1 - weighted_input_derivative) * weighted_input_derivative;
+        double activation_derivative = (1.0 - weighted_input_derivative) * weighted_input_derivative;
         delta[index] = 2.0 * (output[index] - expected) * activation_derivative;
         for (int j = 0; j < previous_len; j++)
         {
@@ -68,7 +68,7 @@ extern "C" __global__ void learn_intermediate(double *output, double *delta, dou
         int index = i + start_index;
         delta[index] = 0.0;
         double weighted_input_derivative = 1.0 / (1.0 + exp(-weighted_input[index]));
-        double activation_derivative = (1 - weighted_input_derivative) * weighted_input_derivative;
+        double activation_derivative = (1.0 - weighted_input_derivative) * weighted_input_derivative;
 
         for (int j = 0; j < next_len; j++)
         {
