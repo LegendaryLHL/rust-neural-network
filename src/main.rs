@@ -6,9 +6,11 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use rust_mnist::Mnist;
 use rustacuda::prelude::*;
 use std::error::Error;
+use std::f64::consts::PI;
 use std::ffi::CString;
 use std::time::Instant;
 use std::{f64, vec};
+const IMAGE_SIZE: usize = 28;
 
 struct NeuralNetwork {
     delta: Vec<Vec<f64>>,
@@ -173,6 +175,7 @@ impl NeuralNetwork {
         let stream = &cuda.1;
         let block_size: u32 = 256;
         for data in training_data {
+            let data = data.process();
             self.compute_gpu(
                 &data.inputs,
                 cuda,
@@ -343,6 +346,7 @@ impl NeuralNetwork {
     }
 }
 
+#[derive(Clone)]
 struct Data {
     inputs: Vec<f64>,
     expected: i32,
@@ -383,6 +387,100 @@ impl Data {
         return testing_data;
     }
 
+    fn process(&self) -> Data {
+        let mut new_data = self.clone();
+        let mut rng = StdRng::from_entropy();
+        new_data.add_noise(0.4, 0.4);
+        new_data.scale(rng.gen_range(0.8..1.2));
+        new_data.rotate(rng.gen_range(-25.0..25.0));
+        new_data.offset(
+            rng.gen_range(-10.0..10.0) as i32,
+            rng.gen_range(-10.0..10.0) as i32,
+        );
+        return new_data;
+    }
+
+    fn rotate(&mut self, angle: f64) {
+        let width = IMAGE_SIZE as i32;
+        let height = IMAGE_SIZE as i32;
+        let rad = angle * PI / 180.0;
+        let cos_angle = rad.cos();
+        let sin_angle = rad.sin();
+        let mut new_inputs = vec![0.0; self.inputs.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let center_x = width / 2;
+                let center_y = height / 2;
+                let src_x = ((x - center_x) as f64 * cos_angle - (y - center_y) as f64 * sin_angle
+                    + center_x as f64) as i32;
+                let src_y = ((x - center_x) as f64 * sin_angle - (y - center_y) as f64 * cos_angle
+                    + center_y as f64) as i32;
+
+                if src_x >= 0 && src_x < width && src_y >= 0 && src_y < height {
+                    new_inputs[(y * width + x) as usize] =
+                        self.inputs[(src_y * width + src_x) as usize];
+                } else {
+                    new_inputs[(y * width + x) as usize] = 0.0;
+                }
+            }
+        }
+        self.inputs = new_inputs;
+    }
+    fn offset(&mut self, offset_x: i32, offset_y: i32) {
+        let width = IMAGE_SIZE as i32;
+        let height = IMAGE_SIZE as i32;
+        let mut new_inputs = vec![0.0; self.inputs.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let new_x = x + offset_x;
+                let new_y = y + offset_y;
+
+                if new_x >= 0 && new_x < width && new_y >= 0 && new_y < height {
+                    new_inputs[(y * width + x) as usize] =
+                        self.inputs[(new_y * width + new_x) as usize]
+                }
+            }
+        }
+        self.inputs = new_inputs;
+    }
+    fn scale(&mut self, scale: f64) {
+        let width = IMAGE_SIZE as i32;
+        let height = IMAGE_SIZE as i32;
+        let scale_width = (width as f64 * scale) as i32;
+        let scale_height = (height as f64 * scale) as i32;
+        let mut scale_input = vec![0.0; (scale_height * scale_width) as usize];
+        let mut new_input = vec![0.0; self.inputs.len()];
+
+        for y in 0..scale_height {
+            for x in 0..scale_width {
+                let src_x = (x as f64 / scale) as i32;
+                let src_y = (y as f64 / scale) as i32;
+
+                if src_x >= 0 && src_x < width && src_y >= 0 && src_y < height {
+                    scale_input[(y * scale_width + x) as usize] =
+                        self.inputs[(src_y * width + src_x) as usize];
+                } else {
+                    scale_input[(y * scale_width + x) as usize] = 0.0;
+                }
+            }
+        }
+
+        let offset_x = scale_width - width / 2;
+        let offset_y = scale_height - height / 2;
+        for y in 0..height {
+            for x in 0..width {
+                let scale_x = x + offset_x;
+                let scale_y = y + offset_y;
+                if scale_x >= 0 && scale_x < scale_width && scale_y >= 0 && scale_y < scale_height {
+                    new_input[(y * width + x) as usize] =
+                        scale_input[(scale_y * scale_width + scale_x) as usize];
+                } else {
+                    new_input[(y * width + x) as usize] = 0.0;
+                }
+            }
+        }
+        self.inputs = new_input;
+    }
     fn add_noise(&mut self, noise_level: f64, probability: f64) {
         let mut rng = StdRng::from_entropy();
         for input in &mut self.inputs {
@@ -479,9 +577,8 @@ fn init_cuda() -> Result<(Module, Stream, Context), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    const IMAGE_SIZE: usize = 28;
     let mut nn = NeuralNetwork::new(vec![IMAGE_SIZE as i32 * IMAGE_SIZE as i32, 100, 16, 10]);
-    nn.train(0.03, 5000, 64, 64)?;
+    nn.train(0.03, 2000, 64, 64)?;
 
     println!("Correct percentage: {:.2}%", nn.test_nn());
 
