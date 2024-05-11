@@ -2,7 +2,7 @@ extern crate rust_mnist;
 
 #[macro_use]
 extern crate rustacuda;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::SmallRng, rngs::StdRng, Rng, SeedableRng};
 use rust_mnist::Mnist;
 use rustacuda::prelude::*;
 use std::error::Error;
@@ -387,15 +387,31 @@ impl Data {
         return testing_data;
     }
 
+    fn debug_print(&self) {
+        for i in 0..IMAGE_SIZE {
+            for j in 0..IMAGE_SIZE {
+                let value = if self.inputs[i * IMAGE_SIZE + j] > 0.0 {
+                    1
+                } else {
+                    0
+                };
+                print!("{}", value);
+            }
+            println!();
+        }
+        println!("{}", self.expected);
+    }
+
     fn process(&self) -> Data {
         let mut new_data = self.clone();
         let mut rng = StdRng::from_entropy();
-        new_data.add_noise(0.4, 0.4);
+        // add noise is too slow
+        //new_data.add_noise(0.1, 0.1);
         new_data.scale(rng.gen_range(0.8..1.2));
         new_data.rotate(rng.gen_range(-25.0..25.0));
         new_data.offset(
-            rng.gen_range(-10.0..10.0) as i32,
-            rng.gen_range(-10.0..10.0) as i32,
+            rng.gen_range(-5.0..5.0) as i32,
+            rng.gen_range(-5.0..5.0) as i32,
         );
         return new_data;
     }
@@ -413,7 +429,8 @@ impl Data {
                 let center_y = height / 2;
                 let src_x = ((x - center_x) as f64 * cos_angle - (y - center_y) as f64 * sin_angle
                     + center_x as f64) as i32;
-                let src_y = ((x - center_x) as f64 * sin_angle - (y - center_y) as f64 * cos_angle
+                let src_y = ((x - center_x) as f64 * sin_angle
+                    + (y - center_y) as f64 * cos_angle
                     + center_y as f64) as i32;
 
                 if src_x >= 0 && src_x < width && src_y >= 0 && src_y < height {
@@ -465,8 +482,8 @@ impl Data {
             }
         }
 
-        let offset_x = scale_width - width / 2;
-        let offset_y = scale_height - height / 2;
+        let offset_x = (scale_width - width) / 2;
+        let offset_y = (scale_height - height) / 2;
         for y in 0..height {
             for x in 0..width {
                 let scale_x = x + offset_x;
@@ -482,10 +499,10 @@ impl Data {
         self.inputs = new_input;
     }
     fn add_noise(&mut self, noise_level: f64, probability: f64) {
-        let mut rng = StdRng::from_entropy();
         for input in &mut self.inputs {
-            if rng.gen::<f64>() > probability {
-                *input = max(1.0, *input + rng.gen::<f64>() * noise_level);
+            let mut rng = SmallRng::from_entropy();
+            if rng.gen::<f64>() <= probability {
+                *input = (*input + rng.gen::<f64>() * noise_level).clamp(0.0, 1.0);
             }
         }
     }
@@ -524,13 +541,6 @@ fn flatten_weights(weights: &[Vec<Vec<f64>>]) -> Vec<f64> {
         }
     }
     flattened
-}
-
-fn max(a: f64, b: f64) -> f64 {
-    if a > b {
-        return a;
-    }
-    return b;
 }
 
 fn activation(val: f64, is_derivative: bool) -> f64 {
@@ -589,6 +599,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         inputs: vec![0.1, 0.2],
         expected: 1,
     };
-    data.add_noise(0.1, 0.1);
+    data.process();
+    data.debug_print();
     Ok(())
 }
