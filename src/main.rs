@@ -9,6 +9,8 @@ use rustacuda::prelude::*;
 use std::error::Error;
 use std::f64::consts::PI;
 use std::ffi::CString;
+use std::fs::{self, File};
+use std::io::Write;
 use std::time::Instant;
 use std::{env, f64, vec};
 const IMAGE_SIZE: usize = 28;
@@ -261,6 +263,7 @@ impl NeuralNetwork {
                 self.copy_bias_from_device(&d_bias, flattened_bias.len())?;
                 self.copy_weights_from_device(&d_weights, flattened_weights.len())?;
                 let new_cost = self.cost(data_slice);
+                self.write_network();
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let speed = data_each_epoch as f64 / elapsed * (epoch_per_learn as f64);
                 println!(
@@ -344,6 +347,55 @@ impl NeuralNetwork {
             }
         }
         return correct_count as f64 / test_data.len() as f64 * 100.0;
+    }
+
+    fn write_network(&self) {
+        if let Err(e) = fs::create_dir_all("output") {
+            println!("Error creating directory: {}", e);
+            return;
+        }
+
+        let mut file = match File::create("output/nn.dat") {
+            Ok(f) => f,
+            Err(_) => {
+                println!("Error opening file for writing");
+                return;
+            }
+        };
+
+        file.write_all(&(self.sizes[0] as i32).to_ne_bytes())
+            .unwrap();
+        file.write_all(&((self.sizes.len() - 2) as i32).to_ne_bytes())
+            .unwrap();
+
+        for i in 1..(self.sizes.len() - 1) {
+            file.write_all(&(self.sizes[i] as i32).to_ne_bytes())
+                .unwrap();
+            for j in 0..self.bias[i].len() {
+                file.write_all(
+                    &self.weights[i][j]
+                        .iter()
+                        .flat_map(|x| x.to_ne_bytes())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                file.write_all(&self.bias[i][j].to_ne_bytes()).unwrap();
+            }
+        }
+
+        file.write_all(&(*self.sizes.last().unwrap() as i32).to_ne_bytes())
+            .unwrap();
+        for i in 0..self.bias.last().unwrap().len() {
+            file.write_all(
+                &self.weights[self.sizes.len() - 1][i]
+                    .iter()
+                    .flat_map(|x| x.to_ne_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            file.write_all(&self.bias[self.sizes.len() - 1][i].to_ne_bytes())
+                .unwrap();
+        }
     }
 }
 
