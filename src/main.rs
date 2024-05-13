@@ -1,15 +1,16 @@
+#![allow(dead_code)]
 extern crate rust_mnist;
 
 #[macro_use]
 extern crate rustacuda;
-use rand::{rngs::SmallRng, rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use rust_mnist::Mnist;
 use rustacuda::prelude::*;
 use std::error::Error;
 use std::f64::consts::PI;
 use std::ffi::CString;
 use std::time::Instant;
-use std::{f64, vec};
+use std::{env, f64, vec};
 const IMAGE_SIZE: usize = 28;
 
 struct NeuralNetwork {
@@ -175,7 +176,7 @@ impl NeuralNetwork {
         let stream = &cuda.1;
         let block_size: u32 = 256;
         for data in training_data {
-            let data = data.process();
+            let data = data.process(cuda).unwrap();
             self.compute_gpu(
                 &data.inputs,
                 cuda,
@@ -356,7 +357,8 @@ impl Data {
     fn from_minst() -> Vec<Self> {
         println!("Loading minst...");
         let mut training_data = Vec::new();
-        let mnist = Mnist::new("mnist/");
+        let current_dir = env::current_dir().expect("Failed to get current directory");
+        let mnist = Mnist::new(current_dir.join("mnist/").to_str().unwrap());
         for (i, mnist_data) in mnist.train_data.iter().enumerate() {
             training_data.push(Data {
                 inputs: mnist_data
@@ -402,18 +404,17 @@ impl Data {
         println!("{}", self.expected);
     }
 
-    fn process(&self) -> Data {
+    fn process(&self, cuda: &(Module, Stream, Context)) -> Result<Data, Box<dyn Error>> {
         let mut new_data = self.clone();
         let mut rng = StdRng::from_entropy();
-        // add noise is too slow
-        //new_data.add_noise(0.1, 0.1);
-        new_data.scale(rng.gen_range(0.8..1.2));
-        new_data.rotate(rng.gen_range(-25.0..25.0));
+        new_data.add_noise(0.1, 0.1, cuda)?;
+        new_data.scale(rng.gen_range(0.9..1.1));
+        new_data.rotate(rng.gen_range(-10.0..10.0));
         new_data.offset(
-            rng.gen_range(-5.0..5.0) as i32,
-            rng.gen_range(-5.0..5.0) as i32,
+            rng.gen_range(-3.0..3.0) as i32,
+            rng.gen_range(-3.0..3.0) as i32,
         );
-        return new_data;
+        Ok(new_data)
     }
 
     fn rotate(&mut self, angle: f64) {
@@ -498,13 +499,28 @@ impl Data {
         }
         self.inputs = new_input;
     }
-    fn add_noise(&mut self, noise_level: f64, probability: f64) {
-        for input in &mut self.inputs {
-            let mut rng = SmallRng::from_entropy();
-            if rng.gen::<f64>() <= probability {
-                *input = (*input + rng.gen::<f64>() * noise_level).clamp(0.0, 1.0);
-            }
+    fn add_noise(
+        &mut self,
+        noise_level: f64,
+        probability: f64,
+        cuda: &(Module, Stream, Context),
+    ) -> Result<(), Box<dyn Error>> {
+        let module = &cuda.0;
+        let stream = &cuda.1;
+        let block_size: u32 = 256;
+        let mut d_inputs = DeviceBuffer::from_slice(&self.inputs)?;
+        unsafe {
+            let grid_size = (self.inputs.len() as u32 + block_size - 1) / block_size;
+            launch!(module.add_noise<<<grid_size, block_size, 0, stream>>>(
+                d_inputs.as_device_ptr(),
+                probability,
+                noise_level,
+                d_inputs.len() as i32
+            ))?;
+            stream.synchronize()?;
         }
+        d_inputs.copy_to(&mut self.inputs)?;
+        Ok(())
     }
 }
 
@@ -588,18 +604,11 @@ fn init_cuda() -> Result<(Module, Stream, Context), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut nn = NeuralNetwork::new(vec![IMAGE_SIZE as i32 * IMAGE_SIZE as i32, 100, 16, 10]);
-    nn.train(0.03, 2000, 64, 64)?;
+    nn.train(0.03, 50000, 64, 64)?;
 
     println!("Correct percentage: {:.2}%", nn.test_nn());
 
-    // remove warning
     nn.print_activation();
     nn.print_percentages();
-    let mut data = Data {
-        inputs: vec![0.1, 0.2],
-        expected: 1,
-    };
-    data.process();
-    data.debug_print();
     Ok(())
 }

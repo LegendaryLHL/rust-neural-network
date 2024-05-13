@@ -1,5 +1,7 @@
 #include <math.h>
 #include <stdio.h>
+#include <curand_kernel.h>
+
 extern "C" __global__ void update_weights(double *weights, double delta, double *input, double learn_rate, int len)
 {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
@@ -80,5 +82,29 @@ extern "C" __global__ void learn_intermediate(double *output, double *delta, dou
             weights[weights_start + i * previous_len + j] -= delta[index] * output[previous_start + j] * learn_rate;
         }
         bias[index] -= delta[index] * learn_rate;
+    }
+}
+
+extern "C" __global__ void add_noise(double *inputs, double probability, double noise_factor, int len)
+{
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < len)
+    {
+        curandState state;
+        curand_init(clock64(), i, 0, &state);
+
+        float random_value = curand_uniform(&state);
+        if (random_value <= probability)
+        {
+            int noise = (int)(curand_uniform(&state) * noise_factor);
+            int new_value = inputs[i] + noise;
+
+            if (new_value < 0.0)
+                new_value = 0.0;
+            if (new_value > 1.0)
+                new_value = 1.0;
+
+            inputs[i] = new_value;
+        }
     }
 }
