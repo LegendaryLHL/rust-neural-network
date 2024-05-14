@@ -61,12 +61,18 @@ impl NeuralNetwork {
 
     fn softmax(&mut self) -> Vec<f64> {
         let mut sum = 0.0;
+        let mut max_output = f64::MIN;
         for output in self.output.last().unwrap() {
-            sum += f64::exp(*output);
+            if *output > max_output {
+                max_output = *output;
+            }
+        }
+        for output in self.output.last().unwrap() {
+            sum += f64::exp(*output - max_output);
         }
         let mut softmax_values = Vec::with_capacity(self.output.last().unwrap().len());
         for output in self.output.last().unwrap() {
-            let softmax_val = f64::exp(*output) / sum;
+            let softmax_val = f64::exp(*output - max_output) / sum;
             softmax_values.push(softmax_val);
         }
         return softmax_values;
@@ -656,7 +662,7 @@ fn init_cuda() -> Result<(Module, Stream, Context), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut nn = NeuralNetwork::new(vec![IMAGE_SIZE as i32 * IMAGE_SIZE as i32, 100, 16, 10]);
-    nn.train(0.03, 50000, 64, 64)?;
+    nn.train(0.03, 50000, 64, 100)?;
 
     println!("Correct percentage: {:.2}%", nn.test_nn());
 
