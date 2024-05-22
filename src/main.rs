@@ -21,6 +21,7 @@ struct NeuralNetwork {
     bias: Vec<Vec<f64>>,
     output: Vec<Vec<f64>>,
     weights: Vec<Vec<Vec<f64>>>,
+    bias_update: Vec<Vec<f64>>,
     sizes: Vec<i32>,
 }
 impl NeuralNetwork {
@@ -30,11 +31,13 @@ impl NeuralNetwork {
         let mut bias = Vec::new();
         let mut output = Vec::new();
         let mut weights = Vec::new();
+        let mut bias_update = Vec::new();
         for (i, layer_size) in layer_sizes.iter().enumerate() {
             delta.push(vec![0.0; *layer_size as usize]);
             weighted_input.push(vec![0.0; *layer_size as usize]);
             bias.push(vec![0.0; *layer_size as usize]);
             output.push(vec![0.0; *layer_size as usize]);
+            bias_update.push(vec![0.0; *layer_size as usize]);
             let mut neuron_weights = Vec::new();
             let mut rng = StdRng::from_entropy();
             if i > 0 {
@@ -55,6 +58,7 @@ impl NeuralNetwork {
             bias,
             output,
             weights,
+            bias_update,
             sizes: layer_sizes,
         }
     }
@@ -245,7 +249,8 @@ impl NeuralNetwork {
 
     fn train(
         &mut self,
-        learn_rate: f64,
+        learning_rate: f64,
+        momentum: f64,
         learn_amount: i32,
         epoch_per_learn: i32,
         data_each_epoch: i32,
@@ -263,11 +268,20 @@ impl NeuralNetwork {
         let mut rng = StdRng::from_entropy();
         let mut rng_index = random_index(&training_data, &mut rng, epoch_per_learn);
         let mut data_slice = &training_data[rng_index..rng_index + data_each_epoch as usize];
+        // momentum
 
         for i in 0..=learn_amount {
             if i % epoch_per_learn == 0 && i != 0 {
-                self.copy_bias_from_device(&d_bias, flattened_bias.len())?;
                 self.copy_weights_from_device(&d_weights, flattened_weights.len())?;
+                //self.copy_bias_from_device(&d_bias, flattened_bias.len())?;
+                // momentum
+                let bias_update = self.get_bias_gradient_from_device(
+                    &d_bias,
+                    learning_rate,
+                    flattened_bias.len(),
+                )?;
+
+                self.update_bias(&bias_update, learning_rate, momentum);
                 let new_cost = self.cost(data_slice);
                 self.write_network();
                 let elapsed = start_time.elapsed().as_secs_f64();
@@ -281,7 +295,7 @@ impl NeuralNetwork {
                 data_slice = &training_data[rng_index..rng_index + data_each_epoch as usize];
             }
             self.learn(
-                learn_rate,
+                learning_rate,
                 data_slice,
                 &cuda,
                 &mut d_output,
@@ -294,6 +308,38 @@ impl NeuralNetwork {
         Ok(())
     }
 
+    fn update_bias(&mut self, bias_update: &Vec<Vec<f64>>, learning_rate: f64, momentum: f64) {
+        for i in 1..self.bias.len() {
+            for j in 0..self.bias[i].len() {
+                // new update momentum
+                self.bias_update[i][j] =
+                    momentum * self.bias_update[i][j] + bias_update[i][j] * learning_rate;
+                self.bias[i][j] -= self.bias_update[i][j];
+            }
+        }
+    }
+
+    fn get_bias_gradient_from_device(
+        &mut self,
+        d_bias: &DeviceBuffer<f64>,
+        learning_rate: f64,
+        size: usize,
+    ) -> Result<Vec<Vec<f64>>, Box<dyn Error>> {
+        let mut bias_gradient = Vec::with_capacity(self.bias.len());
+        let mut bias_data = vec![0.0; size];
+        d_bias.copy_to(&mut bias_data)?;
+        let mut start = 0;
+        for i in 0..self.bias.len() {
+            let mut bias_gradient_layer = Vec::with_capacity(self.bias[i].len());
+            let end = start + self.bias[i].len();
+            for j in 0..self.bias[i].len() {
+                bias_gradient_layer.push((self.bias[i][j] - bias_data[start + j]) / learning_rate);
+            }
+            bias_gradient.push(bias_gradient_layer);
+            start = end;
+        }
+        Ok(bias_gradient)
+    }
     fn copy_bias_from_device(
         &mut self,
         d_bias: &DeviceBuffer<f64>,
@@ -302,7 +348,7 @@ impl NeuralNetwork {
         let mut bias_data = vec![0.0; size];
         d_bias.copy_to(&mut bias_data)?;
         let mut start = 0;
-        for i in 0..self.bias.len() {
+        for i in 1..self.bias.len() {
             let end = start + self.bias[i].len();
             self.bias[i] = bias_data[start..end].to_vec();
             start = end;
@@ -662,7 +708,7 @@ fn init_cuda() -> Result<(Module, Stream, Context), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut nn = NeuralNetwork::new(vec![IMAGE_SIZE as i32 * IMAGE_SIZE as i32, 100, 16, 10]);
-    nn.train(0.03, 50000, 64, 100)?;
+    nn.train(0.03, 0.9, 50000, 64, 100)?;
 
     println!("Correct percentage: {:.2}%", nn.test_nn());
 
