@@ -22,6 +22,7 @@ struct NeuralNetwork {
     output: Vec<Vec<f64>>,
     weights: Vec<Vec<Vec<f64>>>,
     bias_update: Vec<Vec<f64>>,
+    weights_update: Vec<Vec<Vec<f64>>>,
     sizes: Vec<i32>,
 }
 impl NeuralNetwork {
@@ -32,6 +33,7 @@ impl NeuralNetwork {
         let mut output = Vec::new();
         let mut weights = Vec::new();
         let mut bias_update = Vec::new();
+        let mut weights_update = Vec::new();
         for (i, layer_size) in layer_sizes.iter().enumerate() {
             delta.push(vec![0.0; *layer_size as usize]);
             weighted_input.push(vec![0.0; *layer_size as usize]);
@@ -39,6 +41,7 @@ impl NeuralNetwork {
             output.push(vec![0.0; *layer_size as usize]);
             bias_update.push(vec![0.0; *layer_size as usize]);
             let mut neuron_weights = Vec::new();
+            let mut neuron_weights_update = Vec::new();
             let mut rng = StdRng::from_entropy();
             if i > 0 {
                 for _ in 0..*layer_size {
@@ -47,8 +50,10 @@ impl NeuralNetwork {
                         new_weights.push(rng.gen_range(-1.0..1.0));
                     }
                     neuron_weights.push(new_weights);
+                    neuron_weights_update.push(vec![0.0; layer_sizes[i - 1] as usize]);
                 }
             }
+            weights_update.push(neuron_weights_update);
             weights.push(neuron_weights);
         }
 
@@ -59,6 +64,7 @@ impl NeuralNetwork {
             output,
             weights,
             bias_update,
+            weights_update,
             sizes: layer_sizes,
         }
     }
@@ -256,8 +262,8 @@ impl NeuralNetwork {
         data_each_epoch: i32,
     ) -> Result<(), Box<dyn Error>> {
         let cuda = init_cuda()?;
-        let flattened_weights = flatten_weights(&self.weights);
-        let flattened_bias = flatten_vec(&self.bias);
+        let flattened_weights_size = flatten_weights(&self.weights).len();
+        let flattened_bias_size = flatten_vec(&self.bias).len();
         let mut d_bias = DeviceBuffer::from_slice(&flatten_vec(&self.bias))?;
         let mut d_output = DeviceBuffer::from_slice(&flatten_vec(&self.output))?;
         let mut d_weighted_input = DeviceBuffer::from_slice(&flatten_vec(&self.weighted_input))?;
@@ -268,20 +274,23 @@ impl NeuralNetwork {
         let mut rng = StdRng::from_entropy();
         let mut rng_index = random_index(&training_data, &mut rng, epoch_per_learn);
         let mut data_slice = &training_data[rng_index..rng_index + data_each_epoch as usize];
-        // momentum
 
         for i in 0..=learn_amount {
             if i % epoch_per_learn == 0 && i != 0 {
-                self.copy_weights_from_device(&d_weights, flattened_weights.len())?;
-                //self.copy_bias_from_device(&d_bias, flattened_bias.len())?;
                 // momentum
                 let bias_update = self.get_bias_gradient_from_device(
                     &d_bias,
                     learning_rate,
-                    flattened_bias.len(),
+                    flattened_bias_size,
                 )?;
-
+                let weights_update = self.get_weights_gradient_from_device(
+                    &d_weights,
+                    learning_rate,
+                    flattened_weights_size,
+                )?;
                 self.update_bias(&bias_update, learning_rate, momentum);
+                self.update_weights(&weights_update, learning_rate, momentum);
+
                 let new_cost = self.cost(data_slice);
                 self.write_network();
                 let elapsed = start_time.elapsed().as_secs_f64();
@@ -319,6 +328,23 @@ impl NeuralNetwork {
         }
     }
 
+    fn update_weights(
+        &mut self,
+        weights_update: &Vec<Vec<Vec<f64>>>,
+        learning_rate: f64,
+        momentum: f64,
+    ) {
+        for i in 0..self.weights.len() {
+            for j in 0..self.weights[i].len() {
+                for k in 0..self.weights[i][j].len() {
+                    self.weights_update[i][j][k] = momentum * self.weights_update[i][j][k]
+                        + weights_update[i][j][k] * learning_rate;
+                    self.weights[i][j][k] -= self.weights_update[i][j][k];
+                }
+            }
+        }
+    }
+
     fn get_bias_gradient_from_device(
         &mut self,
         d_bias: &DeviceBuffer<f64>,
@@ -339,6 +365,32 @@ impl NeuralNetwork {
             start = end;
         }
         Ok(bias_gradient)
+    }
+    fn get_weights_gradient_from_device(
+        &mut self,
+        d_weights: &DeviceBuffer<f64>,
+        learning_rate: f64,
+        size: usize,
+    ) -> Result<Vec<Vec<Vec<f64>>>, Box<dyn Error>> {
+        let mut weights_gradient = Vec::with_capacity(self.weights.len());
+        let mut weights_data = vec![0.0; size];
+        d_weights.copy_to(&mut weights_data)?;
+
+        let mut start = 0;
+        for i in 0..self.weights.len() {
+            let mut layer_gradient = Vec::with_capacity(self.weights[i].len());
+            for j in 0..self.weights[i].len() {
+                let mut neuron_gradient = Vec::with_capacity(self.weights[i][j].len());
+                for k in 0..self.weights[i][j].len() {
+                    neuron_gradient
+                        .push((self.weights[i][j][k] - weights_data[start + k]) / learning_rate);
+                }
+                layer_gradient.push(neuron_gradient);
+                start += self.weights[i][j].len();
+            }
+            weights_gradient.push(layer_gradient);
+        }
+        Ok(weights_gradient)
     }
     fn copy_bias_from_device(
         &mut self,
